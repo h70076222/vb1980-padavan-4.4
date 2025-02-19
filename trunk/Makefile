@@ -17,9 +17,9 @@ include .config
 include versions.inc
 
 ifeq ($(CONFIG_WITHOUT_KERNEL),y)
-all: dep tools unpack_trx libc_only libs_only user_only romfs image
+all: tools unpack_trx libc_only libs_only user_only romfs image
 else
-all: dep tools linux libc_only libs_only user_only romfs image
+all: tools linux libc_only libs_only user_only romfs image
 endif
 ############################################################################
 #
@@ -30,7 +30,7 @@ ROOTDIR        = $(shell pwd)
 HOSTCC         = gcc
 ROMFSINST      = $(ROOTDIR)/tools/romfs-inst.sh
 TFTPDIR        = /tftpboot
-PATH          := $(if $(filter y,$(CONFIG_CCACHE)),$(CONFIG_CROSS_COMPILER_ROOT)/lib/ccache:,)$(CONFIG_CROSS_COMPILER_ROOT)/bin:$(PATH):$(ROOTDIR)/tools
+PATH          := $(PATH):$(ROOTDIR)/tools:$(ROOTDIR)/tools/go/go/bin
 
 VERSIONSTR     = $(CONFIG_VENDOR)/$(CONFIG_PRODUCT) Version $(VERSIONPKG)
 
@@ -56,8 +56,8 @@ CONFIG_SHELL := $(shell if [ -x "$$BASH" ]; then echo $$BASH; \
 	  else echo sh; fi ; fi)
 
 FIRMWARE_KERNEL_VER="4.4"
+CONFIG_CROSS_COMPILER_ROOT = $(CONFIG_TOOLCHAIN_DIR)/toolchain-4.4.x
 CONFIG_CROSS_COMPILER_PATH = $(CONFIG_CROSS_COMPILER_ROOT)/bin
-CONFIG_CMAKE_TOOLCHAIN_FILE = $(ROOTDIR)/vendors/cmake/cross-mipsel-linux.cmake
 KERNEL_HEADERS_PATH = $(CONFIG_CROSS_COMPILER_ROOT)/mipsel-linux-uclibc/sysroot/usr/include
 
 ifeq (config.arch,$(wildcard config.arch))
@@ -73,8 +73,6 @@ KERNEL_CROSS_COMPILE ?= $(CROSS_COMPILE)
 ifneq ($(SUBARCH),)
 # Using UML, so make the kernel and non-kernel with different ARCHs
 MAKEARCH = $(MAKE) ARCH=$(SUBARCH) CROSS_COMPILE=$(CROSS_COMPILE)
-MAKEARCH_KERNEL = $(MAKE) ARCH=$(ARCH) SUBARCH=$(SUBARCH) CROSS_COMPILE=$(KERNEL_CROSS_COMPILE)
-else
 MAKEARCH = $(MAKE) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE)
 MAKEARCH_KERNEL = $(MAKE) ARCH=$(ARCH) CROSS_COMPILE=$(KERNEL_CROSS_COMPILE)
 endif
@@ -85,7 +83,7 @@ export PROJECT_CONFIG LINUX_CONFIG ROOTDIR LINUXDIR ROMFSDIR SCRIPTSDIR
 export FIRMWARE_KERNEL_VER FIRMWARE_ROOTFS_VER FIRMWARE_BUILDS_VER FIRMWARE_BUILDS_REV
 export VERSIONPKG VERSIONSTR ROMFSINST PATH IMAGEDIR RELFILES TFTPDIR
 export KERNEL_HEADERS_PATH CONFIG_CROSS_COMPILER_ROOT CONFIG_CROSS_COMPILER_PATH
-export CONFIG_CMAKE_TOOLCHAIN_FILE UNSQSHFS_TOOL CONFIG_WITHOUT_KERNEL
+export UNSQSHFS_TOOL CONFIG_WITHOUT_KERNEL
 
 ############################################################################
 
@@ -125,7 +123,8 @@ romfs: romfs.subdirs modules_install romfs.post
 endif
 
 .PHONY: romfs.subdirs
-romfs.subdirs: $(patsubst %,%_romfs,vendors $(DIRS))
+romfs.subdirs:
+	for dir in vendors $(DIRS) ; do [ ! -d $$dir ] || $(MAKEARCH) -C $$dir romfs || exit 1 ; done
 
 .PHONY: romfs.post
 romfs.post:
@@ -135,13 +134,11 @@ romfs.post:
 
 .PHONY: image
 image:
-	@echo "\033[37;44m   $@   \033[0m"
 	[ -d $(IMAGEDIR) ] || mkdir $(IMAGEDIR)
 	$(MAKEARCH) -C vendors image
 
 .PHONY: linux
 linux:
-	@echo "\033[37;43m BUILD \033[0m\033[37;44m   $(@)   \033[0m"
 	$(MAKEARCH_KERNEL) -j$(HOST_NCPU) -C $(LINUXDIR) $(LINUXTARGET) || exit 1
 	if [ -f $(LINUXDIR)/vmlinux ]; then \
 		ln -f $(LINUXDIR)/vmlinux $(LINUXDIR)/linux ; \
@@ -156,48 +153,34 @@ sparseall:
 	$(MAKEARCH_KERNEL) -C $(LINUXDIR) C=2 $(LINUXTARGET) || exit 1
 
 .PHONY: subdirs
-subdirs: $(patsubst %,%_only,$(DIRS))
+subdirs: libs
+	for dir in $(DIRS) ; do [ ! -d $$dir ] || $(MAKEARCH) -C $$dir || exit 1 ; done
 
-.PHONY: config dep
-config:
-	@echo "\033[37;44m   $@   \033[0m"
-	@./configure
-ifeq ($(CONFIG_CCACHE),y)
-	@mkdir -p $(CONFIG_CROSS_COMPILER_ROOT)/lib/ccache
-	@for bin in gcc g++ cc c++; do \
-		ln -sf /usr/bin/ccache $(CONFIG_CROSS_COMPILER_ROOT)/lib/ccache/$$bin; \
-		ln -sf /usr/bin/ccache $(CONFIG_CROSS_COMPILER_ROOT)/lib/ccache/mipsel-linux-uclibc-$$bin; \
-	done
-endif
-
-dep: config
+dep:
+	@if [ ! -f $(LINUXDIR)/.config ] ; then \
+		echo "ERROR: you need to do a 'make config' first" ; \
+		exit 1 ; \
+	fi
 	$(MAKEARCH_KERNEL) -C $(LINUXDIR) olddefconfig
 	$(MAKEARCH_KERNEL) -C $(LINUXDIR) modules_prepare
 
 .PHONY: tools
 tools:
-	@echo "\033[37;44m   $@   \033[0m"
 	make -C tools
 
 .PHONY: unpack_trx
 unpack_trx:
-	@echo "\033[37;44m   $@   \033[0m"
 	unpack-trx.sh
 
-clean: $(patsubst %,%_clean,tools kernel $(DIRS))
-	rm -rf $(STAGEDIR) $(ROMFSDIR) $(IMAGEDIR) $(MERGE_DIR)
+clean:
+	make clean -C tools
+	for dir in  $(DIRS); do [ ! -d $$dir ] || $(MAKEARCH) -C $$dir clean ; done
+	$(MAKEARCH_KERNEL) -C $(LINUXDIR) distclean
+	rm -rf $(STAGEDIR)
+	rm -rf $(ROMFSDIR)
+	rm -rf $(IMAGEDIR)
 	rm -rf $(LINUXDIR)/net/ipsec/alg/libaes $(LINUXDIR)/net/ipsec/alg/perlasm
 	rm -f $(LINUXDIR)/arch/mips/ramdisk/*.gz
-
-.PHONY: tools_clean
-tools_clean:
-	@echo "\033[37;42m CLEAN \033[0m\033[37;44m   $(@:_clean=)   \033[0m"
-	$(MAKE) -C tools clean
-
-.PHONY: kernel_clean
-kernel_clean:
-	@echo "\033[37;42m CLEAN \033[0m\033[37;44m   $(@:_clean=)   \033[0m"
-	$(MAKEARCH_KERNEL) -C $(LINUXDIR) distclean
 
 %_romfs:
 	@case "$(@)" in \
